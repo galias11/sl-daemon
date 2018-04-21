@@ -10,6 +10,7 @@ const running = 'R'
 const stopped = 'S';
 const pidFile = 'pidFile.dat';
 const logFile = 'logFile.dat';
+const maxTimeout = 5000;
 
 //Bash colors
 const requestFormat = '\x1b[33m\x1b[1m';
@@ -18,8 +19,16 @@ const errorFormat = '\x1b[31m\x1b[1m';
 const successFormat = '\x1b[32m\x1b[1m';
 const formatClose = '\x1b[0m';
 
-//Messages
-
+/*
+Writes important events into the daemons log file
+*/
+function log(eventData) {
+  const dateString = new Date(new Date() - (3*60*60*1000)).toISOString()
+    .replace(/T/, ' ')
+    .replace(/\..+/, '');
+  const logEntry = `${dateString}: ${eventData}\n`;
+  fs.appendFileSync(logFile, logEntry);
+}
 
 /*
 Checks daemon status to decide wether it is running or not.
@@ -57,16 +66,29 @@ function daemonStart() {
   checkStatus((status) => {
     if(status === stopped) {
       const forked = fork('sl-daemon-loop.js');
-      forked.on('message', (data) => {
-        if(data.start) {
-          console.log(`${infoFormat}Started sl-daemon with PID:${formatClose} `, data.start);
-          fs.writeFile(pidFile, data.start, function(err) {
-            if(err) {
-              return console.log(err);
-            }
-            process.exit();
-          })
-        }
+      new Promise((resolve, reject) => {
+        forked.on('message', (data) => {
+          if(data.start) {
+            console.log(`${infoFormat}Started sl-daemon with PID:${formatClose} ${data.start}`);
+            log(`Started sl-daemon with PID: ${data.start}`);
+            fs.writeFile(pidFile, data.start, function(err) {
+              if(err) {
+                return console.log(err);
+              }
+              resolve();
+            })
+          }
+        });
+        setTimeout(() => {
+          reject();
+        }, maxTimeout);
+      }).then(() => {
+        process.exit();
+      }).catch(() => {
+        forked.send({terminate: true});
+        console.log(`${errorFormat}sl-daemon timed out, start aborted.${formatClose}`);
+        log(`sl-daemon timed out, start aborted.`);
+        process.exit();
       });
     } else {
       console.log(`${errorFormat}sl-daemon is already running.${formatClose}`);
@@ -77,11 +99,15 @@ function daemonStart() {
 /*
 If daemon is running, the daemon process is stopped
 */
-function daemonStop() {
+function daemonStop(callback) {
   checkStatus((status, pid) => {
     if(status === running) {
       process.kill(pid);
       console.log(`${infoFormat}sl-daemon has been stopped.${formatClose}`);
+      log(`sl-daemon has been stopped.`)
+      if(callback){
+        callback()
+      }
     } else {
       console.log(`${errorFormat}sl-daemon is not running.${formatClose}`);
     }
@@ -95,8 +121,7 @@ Otherwise, the daemon is started.
 function daemonRestart() {
   checkStatus((status, pid) => {
     if(status === running) {
-      daemonStop();
-      daemonStart();
+      daemonStop(daemonStart);
     } else {
       daemonStart();
     }
